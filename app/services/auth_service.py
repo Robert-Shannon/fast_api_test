@@ -4,35 +4,40 @@ from app.models.user import User
 from app.schemas.user import UserCreate
 from app.core.config import settings
 
+# Initialize WorkOS client correctly
+workos_client = workos.WorkOSClient(
+    api_key=settings.workos_api_key,
+    client_id=settings.workos_client_id
+)
+
 class AuthService:
-    def __init__(self):
-        workos.api_key = settings.workos_api_key
-        workos.client_id = settings.workos_client_id
+    def get_auth_url(self) -> str:
+        """Get WorkOS AuthKit URL"""
+        authorization_url = workos_client.user_management.get_authorization_url(
+            provider="authkit",
+            redirect_uri=settings.workos_redirect_uri
+        )
+        return authorization_url
     
-    async def verify_token(self, token: str, db: Session) -> User:
-        """Verify WorkOS token and return user"""
+    async def handle_callback(self, code: str, db: Session):
+        """Handle the OAuth callback"""
         try:
-            # Verify with WorkOS
-            profile = workos.sso.get_profile_and_token(token)
-            workos_user_id = profile.profile.id
-            email = profile.profile.email
+            # Exchange code for user
+            profile_and_token = workos_client.user_management.authenticate_with_code(
+                code=code
+            )
             
-            # Find or create user
-            user = db.query(User).filter(User.workos_user_id == workos_user_id).first()
+            user_profile = profile_and_token.user
+            
+            # Find or create user in your database
+            user = db.query(User).filter(User.workos_user_id == user_profile.id).first()
             if not user:
-                user_data = UserCreate(email=email, workos_user_id=workos_user_id)
+                user_data = UserCreate(email=user_profile.email, workos_user_id=user_profile.id)
                 user = User(**user_data.dict())
                 db.add(user)
                 db.commit()
                 db.refresh(user)
             
-            return user
-        except Exception:
-            return None
-    
-    def get_auth_url(self, redirect_uri: str) -> str:
-        """Get WorkOS authentication URL"""
-        return workos.sso.get_authorization_url(
-            redirect_uri=redirect_uri,
-            client_id=settings.workos_client_id
-        )
+            return user, profile_and_token.access_token
+        except Exception as e:
+            raise Exception(f"Authentication failed: {str(e)}")
